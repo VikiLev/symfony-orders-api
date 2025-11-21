@@ -16,6 +16,9 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\Routing\Annotation\Route;
 use Symfony\Component\Validator\Validator\ValidatorInterface;
+use Symfony\Component\Validator\ConstraintViolationListInterface;
+use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpKernel\KernelInterface;
 
 class OrderController extends AbstractController
 {
@@ -25,7 +28,9 @@ class OrderController extends AbstractController
         private CreateOrder        $createOrder,
         private UpdateOrder        $updateOrder,
         private DeleteOrder        $deleteOrder,
-        private ChangeOrderStatus  $changeOrderStatus
+        private ChangeOrderStatus  $changeOrderStatus,
+        private LoggerInterface    $logger,
+        private KernelInterface    $kernel
     )
     {
     }
@@ -66,43 +71,32 @@ class OrderController extends AbstractController
     #[Route('/api/orders', name: 'create', methods: ['POST'])]
     public function create(Request $request): Response
     {
-        try {
-            $data = $request->toArray();
-        } catch (\Exception $e) {
-            return $this->json(['error' => 'Invalid JSON'], Response::HTTP_BAD_REQUEST);
+        $orderDto = $this->createOrderDtoFromRequest($request);
+        if ($orderDto instanceof Response) {
+            return $orderDto; // Error response
         }
 
-        $itemsDto = [];
-        foreach ($data['items'] ?? [] as $item) {
-            $itemsDto[] = new OrderItemDTO(
-                $item['productName'] ?? '',
-                (int)($item['quantity'] ?? 0),
-                (float)($item['price'] ?? 0)
-            );
-        }
-
-        $orderDto = new OrderDTO(
-            $data['customerName'] ?? '',
-            $data['customerEmail'] ?? '',
-            (float)($data['totalAmount'] ?? 0),
-            $itemsDto
-        );
-
-        $errors = $this->validator->validate($orderDto);
-        if (count($errors) > 0) {
-            $messages = [];
-            foreach ($errors as $error) {
-                $messages[] = $error->getPropertyPath() . ': ' . $error->getMessage();
-            }
-            return $this->json(['errors' => $messages], Response::HTTP_BAD_REQUEST);
+        $validationError = $this->validateOrderDto($orderDto);
+        if ($validationError !== null) {
+            return $validationError;
         }
 
         try {
             /** @var Order $order */
             $order = $this->createOrder->createOrder($orderDto);
         } catch (\Exception $e) {
+            $this->logger->error('Failed to create order', [
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'dto' => [
+                    'customerName' => $orderDto->customerName,
+                    'customerEmail' => $orderDto->customerEmail,
+                ]
+            ]);
+            
+            $errorMessage = $this->getErrorMessage($e);
             return $this->json(
-                ['error' => 'Failed to create order', 'details' => $e->getMessage()],
+                ['error' => 'Failed to create order', 'details' => $errorMessage],
                 Response::HTTP_INTERNAL_SERVER_ERROR
             );
         }
@@ -111,43 +105,37 @@ class OrderController extends AbstractController
     }
 
     #[Route('/api/orders/{id}', name: 'update_order', methods: ['PUT'])]
-    public function update(int $id, Request $request, ValidatorInterface $validator): Response
+    public function update(int $id, Request $request): Response
     {
-        try {
-            $data = $request->toArray();
-        } catch (\Exception $e) {
-            return $this->json(['error' => 'Invalid JSON'], Response::HTTP_BAD_REQUEST);
+        $orderDto = $this->createOrderDtoFromRequest($request);
+        if ($orderDto instanceof Response) {
+            return $orderDto; // Error response
         }
 
-        $itemsDto = [];
-        foreach ($data['items'] ?? [] as $item) {
-            $itemsDto[] = new OrderItemDTO(
-                $item['productName'] ?? '',
-                (int)($item['quantity'] ?? 0),
-                (float)($item['price'] ?? 0)
-            );
-        }
-
-        $dto = new OrderDTO(
-            $data['customerName'] ?? '',
-            $data['customerEmail'] ?? '',
-            (float)($data['totalAmount'] ?? 0),
-            $itemsDto
-        );
-
-        $errors = $validator->validate($dto);
-        if (count($errors) > 0) {
-            $messages = [];
-            foreach ($errors as $error) {
-                $messages[] = $error->getPropertyPath() . ': ' . $error->getMessage();
-            }
-            return $this->json(['errors' => $messages], Response::HTTP_BAD_REQUEST);
+        $validationError = $this->validateOrderDto($orderDto);
+        if ($validationError !== null) {
+            return $validationError;
         }
 
         try {
-            $order = $this->updateOrder->update($id, $dto);
+            $order = $this->updateOrder->update($id, $orderDto);
         } catch (\RuntimeException $e) {
+            $this->logger->warning('Failed to update order', [
+                'orderId' => $id,
+                'exception' => $e->getMessage()
+            ]);
             return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
+        } catch (\Exception $e) {
+            $this->logger->error('Unexpected error while updating order', [
+                'orderId' => $id,
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $errorMessage = $this->getErrorMessage($e);
+            return $this->json(
+                ['error' => 'Failed to update order', 'details' => $errorMessage],
+                Response::HTTP_INTERNAL_SERVER_ERROR
+            );
         }
 
         return $this->json($order);
@@ -158,9 +146,21 @@ class OrderController extends AbstractController
     {
         try {
             $this->deleteOrder->deleteById($id);
+        } catch (\RuntimeException $e) {
+            $this->logger->warning('Failed to delete order', [
+                'orderId' => $id,
+                'exception' => $e->getMessage()
+            ]);
+            return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
         } catch (\Exception $e) {
+            $this->logger->error('Unexpected error while deleting order', [
+                'orderId' => $id,
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $errorMessage = $this->getErrorMessage($e);
             return $this->json(
-                ['error' => 'Failed to delete order', 'details' => $e->getMessage()],
+                ['error' => 'Failed to delete order', 'details' => $errorMessage],
                 Response::HTTP_INTERNAL_SERVER_ERROR
             );
         }
@@ -176,11 +176,29 @@ class OrderController extends AbstractController
             $status = $data['status'] ?? '';
             $order = $this->changeOrderStatus->changeStatus($id, $status);
         } catch (\RuntimeException $e) {
+            $this->logger->warning('Failed to update order status', [
+                'orderId' => $id,
+                'exception' => $e->getMessage()
+            ]);
             return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
         } catch (\InvalidArgumentException $e) {
+            $this->logger->warning('Invalid status provided', [
+                'orderId' => $id,
+                'status' => $data['status'] ?? null,
+                'exception' => $e->getMessage()
+            ]);
             return $this->json(['error' => $e->getMessage()], Response::HTTP_BAD_REQUEST);
         } catch (\Exception $e) {
-            return $this->json(['error' => 'Failed to update status'], Response::HTTP_INTERNAL_SERVER_ERROR);
+            $this->logger->error('Unexpected error while updating order status', [
+                'orderId' => $id,
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            $errorMessage = $this->getErrorMessage($e);
+            return $this->json(
+                ['error' => 'Failed to update status', 'details' => $errorMessage],
+                Response::HTTP_INTERNAL_SERVER_ERROR
+            );
         }
 
         return $this->json([
@@ -188,6 +206,76 @@ class OrderController extends AbstractController
             'status' => $order->getStatus(),
             'updatedAt' => $order->getUpdatedAt()?->format('Y-m-d H:i:s'),
         ]);
+    }
+
+    /**
+     * Creates OrderDTO from Request, returns Response if error occurred
+     */
+    private function createOrderDtoFromRequest(Request $request): OrderDTO|Response
+    {
+        try {
+            $data = $request->toArray();
+        } catch (\Exception $e) {
+            $this->logger->warning('Invalid JSON in request', [
+                'exception' => $e->getMessage()
+            ]);
+            return $this->json(['error' => 'Invalid JSON'], Response::HTTP_BAD_REQUEST);
+        }
+
+        $itemsDto = [];
+        foreach ($data['items'] ?? [] as $item) {
+            $itemsDto[] = new OrderItemDTO(
+                $item['productName'] ?? '',
+                (int)($item['quantity'] ?? 0),
+                (float)($item['price'] ?? 0)
+            );
+        }
+
+        return new OrderDTO(
+            $data['customerName'] ?? '',
+            $data['customerEmail'] ?? '',
+            (float)($data['totalAmount'] ?? 0),
+            $itemsDto
+        );
+    }
+
+    /**
+     * Validates OrderDTO, returns Response with errors if validation failed, null otherwise
+     */
+    private function validateOrderDto(OrderDTO $orderDto): ?Response
+    {
+        $errors = $this->validator->validate($orderDto);
+        if (count($errors) > 0) {
+            $messages = $this->formatValidationErrors($errors);
+            return $this->json(['errors' => $messages], Response::HTTP_BAD_REQUEST);
+        }
+
+        return null;
+    }
+
+    /**
+     * Formats validation errors into array of messages
+     */
+    private function formatValidationErrors(ConstraintViolationListInterface $errors): array
+    {
+        $messages = [];
+        foreach ($errors as $error) {
+            $messages[] = $error->getPropertyPath() . ': ' . $error->getMessage();
+        }
+        return $messages;
+    }
+
+    /**
+     * Returns error message based on environment (hides details in production)
+     */
+    private function getErrorMessage(\Exception $e): string
+    {
+        // In production, don't expose internal error details
+        if ($this->kernel->getEnvironment() === 'prod') {
+            return 'An internal error occurred. Please try again later.';
+        }
+        
+        return $e->getMessage();
     }
 
 }

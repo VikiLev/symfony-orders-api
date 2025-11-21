@@ -52,8 +52,23 @@ class EmailNotificationHandler
             ->subject($subject)
             ->text($body);
 
-        $this->mailer->send($email);
-        $this->logger->info("Email ({$message->type}) sent for Order #{$order->getId()}");
+        try {
+            $this->mailer->send($email);
+            $this->logger->info("Email ({$message->type}) sent for Order #{$order->getId()}", [
+                'orderId' => $order->getId(),
+                'type' => $message->type,
+                'email' => $order->getCustomerEmail()
+            ]);
+        } catch (\Exception $e) {
+            $this->logger->error("Failed to send email for Order #{$order->getId()}", [
+                'orderId' => $order->getId(),
+                'type' => $message->type,
+                'email' => $order->getCustomerEmail(),
+                'exception' => $e->getMessage(),
+                'trace' => $e->getTraceAsString()
+            ]);
+            throw $e;
+        }
     }
 }
 
