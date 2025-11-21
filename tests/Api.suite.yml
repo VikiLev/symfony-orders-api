@@ -1,5 +1,0 @@
-actor: Api
-suite_namespace: Tests\Api
-modules:
-    # enable helpers as array
-    enabled: []
