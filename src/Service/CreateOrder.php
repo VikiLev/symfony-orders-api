@@ -6,12 +6,15 @@ use App\DTO\Order as OrderDTO;
 use App\Entity\Order;
 use App\Entity\OrderItem;
 use Doctrine\ORM\EntityManagerInterface;
+use App\Event\OrderCreatedEvent;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 class CreateOrder
 {
-    public function __construct(private EntityManagerInterface $em)
-    {
-    }
+    public function __construct(
+        private EntityManagerInterface $em,
+        private EventDispatcherInterface $dispatcher
+    ) {}
 
     public function createOrder(OrderDTO $dto): Order
     {
@@ -33,6 +36,8 @@ class CreateOrder
 
         $this->em->persist($order);
         $this->em->flush();
+
+        $this->dispatcher->dispatch(new OrderCreatedEvent($order), OrderCreatedEvent::NAME);
 
         return $order;
     }

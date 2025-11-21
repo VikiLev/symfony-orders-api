@@ -5,12 +5,15 @@ namespace App\Service;
 use App\Entity\Order;
 use App\Repository\OrderRepository;
 use Doctrine\ORM\EntityManagerInterface;
+use App\Event\OrderStatusChangedEvent;
+use Symfony\Contracts\EventDispatcher\EventDispatcherInterface;
 
 class ChangeOrderStatus
 {
     public function __construct(
         private EntityManagerInterface $em,
-        private OrderRepository        $orderRepository
+        private OrderRepository        $orderRepository,
+        private EventDispatcherInterface $dispatcher
     )
     {}
 
@@ -25,9 +28,16 @@ class ChangeOrderStatus
             throw new \InvalidArgumentException('Invalid status value');
         }
 
+        $oldStatus = $order->getStatus();
+
         $order->setStatus($status);
         $order->setUpdatedAt(new \DateTimeImmutable());
         $this->em->flush();
+
+        $this->dispatcher->dispatch(
+            new OrderStatusChangedEvent($order, $oldStatus, $status),
+            OrderStatusChangedEvent::NAME
+        );
 
         return $order;
     }

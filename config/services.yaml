@@ -26,3 +26,6 @@ services:
             $defaultContext:
                 circular_reference_handler: '@App\Serializer\CircularReferenceHandler'
                 ignored_attributes: []
+
+    App\MessageHandler\EmailNotificationHandler:
+        tags: [ 'messenger.message_handler' ]
