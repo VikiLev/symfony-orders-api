@@ -59,10 +59,7 @@ class OrderController extends AbstractController
         $order = $this->orderRepository->find($id);
 
         if (!$order) {
-            return $this->json(
-                ['error' => 'Order not found'],
-                Response::HTTP_NOT_FOUND
-            );
+            return $this->createErrorResponse('Order not found', Response::HTTP_NOT_FOUND);
         }
 
         return $this->json($order, Response::HTTP_OK);
@@ -84,6 +81,15 @@ class OrderController extends AbstractController
         try {
             /** @var Order $order */
             $order = $this->createOrder->createOrder($orderDto);
+        } catch (\InvalidArgumentException $e) {
+            $this->logger->warning('Validation error while creating order', [
+                'exception' => $e->getMessage(),
+                'dto' => [
+                    'customerName' => $orderDto->customerName,
+                    'customerEmail' => $orderDto->customerEmail,
+                ]
+            ]);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_BAD_REQUEST);
         } catch (\Exception $e) {
             $this->logger->error('Failed to create order', [
                 'exception' => $e->getMessage(),
@@ -95,10 +101,7 @@ class OrderController extends AbstractController
             ]);
             
             $errorMessage = $this->getErrorMessage($e);
-            return $this->json(
-                ['error' => 'Failed to create order', 'details' => $errorMessage],
-                Response::HTTP_INTERNAL_SERVER_ERROR
-            );
+            return $this->createErrorResponse('Failed to create order', Response::HTTP_INTERNAL_SERVER_ERROR, $errorMessage);
         }
 
         return $this->json(['id' => $order->getId()], Response::HTTP_CREATED);
@@ -119,12 +122,18 @@ class OrderController extends AbstractController
 
         try {
             $order = $this->updateOrder->update($id, $orderDto);
+        } catch (\InvalidArgumentException $e) {
+            $this->logger->warning('Validation error while updating order', [
+                'orderId' => $id,
+                'exception' => $e->getMessage()
+            ]);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_BAD_REQUEST);
         } catch (\RuntimeException $e) {
             $this->logger->warning('Failed to update order', [
                 'orderId' => $id,
                 'exception' => $e->getMessage()
             ]);
-            return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_NOT_FOUND);
         } catch (\Exception $e) {
             $this->logger->error('Unexpected error while updating order', [
                 'orderId' => $id,
@@ -132,10 +141,7 @@ class OrderController extends AbstractController
                 'trace' => $e->getTraceAsString()
             ]);
             $errorMessage = $this->getErrorMessage($e);
-            return $this->json(
-                ['error' => 'Failed to update order', 'details' => $errorMessage],
-                Response::HTTP_INTERNAL_SERVER_ERROR
-            );
+            return $this->createErrorResponse('Failed to update order', Response::HTTP_INTERNAL_SERVER_ERROR, $errorMessage);
         }
 
         return $this->json($order);
@@ -151,7 +157,7 @@ class OrderController extends AbstractController
                 'orderId' => $id,
                 'exception' => $e->getMessage()
             ]);
-            return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_NOT_FOUND);
         } catch (\Exception $e) {
             $this->logger->error('Unexpected error while deleting order', [
                 'orderId' => $id,
@@ -159,10 +165,7 @@ class OrderController extends AbstractController
                 'trace' => $e->getTraceAsString()
             ]);
             $errorMessage = $this->getErrorMessage($e);
-            return $this->json(
-                ['error' => 'Failed to delete order', 'details' => $errorMessage],
-                Response::HTTP_INTERNAL_SERVER_ERROR
-            );
+            return $this->createErrorResponse('Failed to delete order', Response::HTTP_INTERNAL_SERVER_ERROR, $errorMessage);
         }
 
         return $this->json(null, Response::HTTP_NO_CONTENT);
@@ -173,21 +176,21 @@ class OrderController extends AbstractController
     {
         try {
             $data = $request->toArray();
-            $status = $data['status'] ?? '';
+            $status = $this->sanitizeString($data['status'] ?? '');
             $order = $this->changeOrderStatus->changeStatus($id, $status);
         } catch (\RuntimeException $e) {
             $this->logger->warning('Failed to update order status', [
                 'orderId' => $id,
                 'exception' => $e->getMessage()
             ]);
-            return $this->json(['error' => $e->getMessage()], Response::HTTP_NOT_FOUND);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_NOT_FOUND);
         } catch (\InvalidArgumentException $e) {
             $this->logger->warning('Invalid status provided', [
                 'orderId' => $id,
                 'status' => $data['status'] ?? null,
                 'exception' => $e->getMessage()
             ]);
-            return $this->json(['error' => $e->getMessage()], Response::HTTP_BAD_REQUEST);
+            return $this->createErrorResponse($e->getMessage(), Response::HTTP_BAD_REQUEST);
         } catch (\Exception $e) {
             $this->logger->error('Unexpected error while updating order status', [
                 'orderId' => $id,
@@ -195,10 +198,7 @@ class OrderController extends AbstractController
                 'trace' => $e->getTraceAsString()
             ]);
             $errorMessage = $this->getErrorMessage($e);
-            return $this->json(
-                ['error' => 'Failed to update status', 'details' => $errorMessage],
-                Response::HTTP_INTERNAL_SERVER_ERROR
-            );
+            return $this->createErrorResponse('Failed to update status', Response::HTTP_INTERNAL_SERVER_ERROR, $errorMessage);
         }
 
         return $this->json([
@@ -219,24 +219,53 @@ class OrderController extends AbstractController
             $this->logger->warning('Invalid JSON in request', [
                 'exception' => $e->getMessage()
             ]);
-            return $this->json(['error' => 'Invalid JSON'], Response::HTTP_BAD_REQUEST);
+            return $this->createErrorResponse('Invalid JSON format', Response::HTTP_BAD_REQUEST);
         }
 
+        // Sanitize input data
         $itemsDto = [];
         foreach ($data['items'] ?? [] as $item) {
             $itemsDto[] = new OrderItemDTO(
-                $item['productName'] ?? '',
-                (int)($item['quantity'] ?? 0),
-                (float)($item['price'] ?? 0)
+                $this->sanitizeString($item['productName'] ?? ''),
+                max(1, (int)($item['quantity'] ?? 0)),
+                max(0, (float)($item['price'] ?? 0))
             );
         }
 
         return new OrderDTO(
-            $data['customerName'] ?? '',
-            $data['customerEmail'] ?? '',
-            (float)($data['totalAmount'] ?? 0),
+            $this->sanitizeString($data['customerName'] ?? ''),
+            $this->sanitizeEmail($data['customerEmail'] ?? ''),
+            max(0, (float)($data['totalAmount'] ?? 0)),
             $itemsDto
         );
+    }
+
+    /**
+     * Sanitizes string input
+     */
+    private function sanitizeString(string $value): string
+    {
+        return trim(strip_tags($value));
+    }
+
+    /**
+     * Sanitizes email input
+     */
+    private function sanitizeEmail(string $email): string
+    {
+        return trim(strtolower(filter_var($email, FILTER_SANITIZE_EMAIL)));
+    }
+
+    /**
+     * Creates consistent error response
+     */
+    private function createErrorResponse(string $message, int $statusCode, ?string $details = null): JsonResponse
+    {
+        $response = ['error' => $message];
+        if ($details !== null && $this->kernel->getEnvironment() !== 'prod') {
+            $response['details'] = $details;
+        }
+        return $this->json($response, $statusCode);
     }
 
     /**

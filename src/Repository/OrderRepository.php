@@ -20,6 +20,8 @@ class OrderRepository extends ServiceEntityRepository
     public function getFilteredOrders(int $page, int $limit, array $filters): array
     {
         $qb = $this->createQueryBuilder('o')
+            ->leftJoin('o.items', 'i')
+            ->addSelect('i')
             ->orderBy('o.id', 'DESC');
 
         $this->applyFilters($qb, $filters);

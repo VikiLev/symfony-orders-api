@@ -6,10 +6,11 @@ use Symfony\Component\Validator\Constraints as Assert;
 
 class Order
 {
-    #[Assert\NotBlank]
+    #[Assert\NotBlank(message: 'Customer name is required')]
     public string $customerName;
 
-    #[Assert\Email]
+    #[Assert\NotBlank(message: 'Customer email is required')]
+    #[Assert\Email(message: 'Invalid email format')]
     public string $customerEmail;
 
     #[Assert\Positive]
